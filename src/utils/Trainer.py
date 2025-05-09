@@ -1,23 +1,25 @@
-# 필요한 라이브러리
+# src/utils/Trainer.py
+
 import torch
 from torch.cuda.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
-from torch_geometric.data import Data, Batch
-import matplotlib.pyplot as plt
 from IPython.display import clear_output, display
+import matplotlib.pyplot as plt
+
+from dataset.dataset_config import edge_index, edge_attr
 
 class Trainer:
     def __init__(
         self,
-        model,
-        train_loader: DataLoader,
-        valid_loader: DataLoader,
+        model: torch.nn.Module,
+        train_loader,
+        valid_loader,
         optimizer: torch.optim.Optimizer,
         criterion,
         epochs: int = 10,
         device: str = 'cuda',
         print_interval: int = 1,
         plot_interval: int = 1,
+        early_stopping_patience: int = 5,
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -28,15 +30,22 @@ class Trainer:
         self.device = device
         self.print_interval = print_interval
         self.plot_interval = plot_interval
+        self.early_stopping_patience = early_stopping_patience
 
-        # 기록 저장
+        # edge_index/edge_attr 텐서로 변환 & device 이동
+        self.edge_index = torch.from_numpy(edge_index).long().to(device)
+        self.edge_attr  = torch.from_numpy(edge_attr).float().to(device)
+
+        # Mixed precision
+        self.scaler = GradScaler()
+
+        # 기록
         self.history = {
             'train_loss': [], 'valid_loss': [],
             'train_mape': [], 'valid_mape': []
         }
         self.best_val_loss = float('inf')
         self.no_improve = 0
-        self.scaler = GradScaler()
 
         # 실시간 플롯 준비
         self.fig, self.ax = plt.subplots()
@@ -46,40 +55,7 @@ class Trainer:
         mask = true.abs() > 1e-3
         return (torch.abs((pred[mask] - true[mask]) / true[mask])).mean().item()
 
-    def _unpack_batch(self, batch):
-        """
-        배치에서 모델 입력(input)과 타깃(target)을 분리하는 메서드.
-        배치 형태에 맞게 오버라이드하거나 조건문을 추가하세요.
-        """
-        # 예시: dict 형태
-        if isinstance(batch, dict):
-            return batch['past_edges'], batch['future_edges']
-        # PyG Data or Batch
-        if isinstance(batch, (Data, Batch)):
-            # x, y 프로퍼티에 담겨 있다고 가정
-            return batch.x, batch.y
-        raise ValueError("지원하지 않는 배치 형식입니다.")
-
-    def _predict(self, inputs):
-        """
-        모델 호출 방식 추상화.
-        단일 입력, 다중 입력 등 모델 시그니처에 맞게 수정하세요.
-        """
-        # 예시: 단일 텐서 입력
-        return self.model(inputs)
-        # 또는
-        # return self.model(inputs.x, inputs.edge_index, inputs.edge_attr)
-
-    def _move_to_device(self, tensor):
-        """
-        텐서나 Data/Batch 객체를 device로 옮기는 유틸.
-        """
-        if isinstance(tensor, (Data, Batch)):
-            return tensor.to(self.device)
-        return tensor.to(self.device)
-
     def plot_live(self, epoch):
-        """주기적 실시간 플롯."""
         self.ax.clear()
         xs = range(1, epoch+1)
         self.ax.plot(xs, self.history['train_loss'], label='Train Loss')
@@ -96,23 +72,28 @@ class Trainer:
         for epoch in range(1, self.epochs + 1):
             # === Training ===
             self.model.train()
-            total_loss, total_mape, n = 0.0, 0.0, 0
-            for batch in self.train_loader:
-                inputs, targets = self._unpack_batch(batch)
-                inputs, targets = self._move_to_device(inputs), self._move_to_device(targets)
-                B = targets.size(0)
+            total_loss = 0.0
+            total_mape = 0.0
+            n = 0
+
+            for x_batch, y_batch in self.train_loader:
+                # (x_batch: [B, T, E, D_in], y_batch: [B, n_pred, E, D_out])
+                x_batch = x_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
 
                 with autocast():
-                    pred = self._predict(inputs)
-                    loss = self.criterion(pred, targets)
+                    pred = self.model(x_batch, self.edge_index, self.edge_attr)
+                    # pred: [B, n_pred, E, D_out]
+                    loss = self.criterion(pred, y_batch)
 
                 self.optimizer.zero_grad()
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
 
+                B = x_batch.size(0)
                 total_loss += loss.item() * B
-                total_mape += self.mape(pred, targets) * B
+                total_mape += self.mape(pred, y_batch) * B
                 n += B
 
             train_loss = total_loss / n
@@ -120,18 +101,21 @@ class Trainer:
 
             # === Validation ===
             self.model.eval()
-            val_loss, val_mape, n_val = 0.0, 0.0, 0
+            val_loss = 0.0
+            val_mape = 0.0
+            n_val = 0
+
             with torch.no_grad():
-                for batch in self.valid_loader:
-                    inputs, targets = self._unpack_batch(batch)
-                    inputs, targets = self._move_to_device(inputs), self._move_to_device(targets)
-                    B = targets.size(0)
+                for x_batch, y_batch in self.valid_loader:
+                    x_batch = x_batch.to(self.device)
+                    y_batch = y_batch.to(self.device)
 
-                    pred = self._predict(inputs)
-                    loss = self.criterion(pred, targets)
+                    pred = self.model(x_batch, self.edge_index, self.edge_attr)
+                    loss = self.criterion(pred, y_batch)
 
+                    B = x_batch.size(0)
                     val_loss += loss.item() * B
-                    val_mape += self.mape(pred, targets) * B
+                    val_mape += self.mape(pred, y_batch) * B
                     n_val += B
 
             valid_loss = val_loss / n_val
@@ -158,7 +142,7 @@ class Trainer:
                 self.no_improve = 0
             else:
                 self.no_improve += 1
-                if self.no_improve >= 5:
+                if self.no_improve >= self.early_stopping_patience:
                     print(f"Early stopping at epoch {epoch}")
                     break
 

@@ -1,5 +1,6 @@
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split, RandomSampler
+from torch.utils.data import Dataset, random_split, RandomSampler
+from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
 import numpy as np
 from .dataset_config import (
@@ -70,15 +71,16 @@ class TrafficDataset(Dataset):
 
         # future_edges → y: flatten to (n_pred * E, D_tar)
         future_edges = torch.cat([Xf, tod_feat_dec, dow_feat_dec], dim=-1)[..., :3]  # (3, E, 3)
-        n_pred, E, D_tar = future_edges.shape
-        y = future_edges.reshape(n_pred * E, D_tar)  # (n_pred*E, 3)
+        y = future_edges
+        # n_pred, E, D_tar = future_edges.shape
+        # y = future_edges.reshape(n_pred * E, D_tar)  # (n_pred*E, 3)
 
         # PyG Data 객체 생성
         data = Data(
             x=x,                        # [T, E, D_in]
             edge_index=EDGE_INDEX,      # [2, E]
             edge_attr=EDGE_ATTR,        # [E, F_e]
-            y=y                         # [n_pred*E, D_tar]
+            y=y                         # [n_pred, E, D_tar]
         )
 
         return data
