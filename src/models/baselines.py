@@ -426,7 +426,7 @@ class STAEformer(nn.Module):
     def forward(self, x, edge_index, edge_attr=None):
         # x: (batch_size, in_steps, num_nodes, input_dim+tod+dow=3)
         batch_size = x.shape[0]
-        print("x shape:", x.shape)
+        
 
         if self.tod_embedding_dim > 0:
             tod = x[..., 3]/self.steps_per_day
@@ -436,31 +436,33 @@ class STAEformer(nn.Module):
         x = x[..., : self.input_dim]
 
         x = self.input_proj(x)  # (batch_size, in_steps, num_nodes, input_embedding_dim)
+        
         features = [x]
         if self.tod_embedding_dim > 0:
             tod_emb = self.tod_embedding(
                 (tod * self.steps_per_day).long()
             )  # (batch_size, in_steps, num_nodes, tod_embedding_dim)
-            print(tod_emb.shape)
+            
             features.append(tod_emb)
         if self.dow_embedding_dim > 0:
             dow_emb = self.dow_embedding(
                 dow.long()
             )  # (batch_size, in_steps, num_nodes, dow_embedding_dim)
-            print(dow_emb.shape)
-            features.append(dow_emb,"실행되는지?")
+            
+            features.append(dow_emb)
         if self.spatial_embedding_dim > 0:
             spatial_emb = self.node_emb.expand(
                 batch_size, self.in_steps, *self.node_emb.shape
             )
-            print(spatial_emb.shape)
+            
             features.append(spatial_emb)
         if self.adaptive_embedding_dim > 0:
             adp_emb = self.adaptive_embedding.expand(
                 size=(batch_size, *self.adaptive_embedding.shape)
             )
             features.append(adp_emb)
-            print(adp_emb.shape,"실행되나요")
+            
+
         x = torch.cat(features, dim=-1)  # (batch_size, in_steps, num_nodes, model_dim)
 
         for attn in self.attn_layers_t:
