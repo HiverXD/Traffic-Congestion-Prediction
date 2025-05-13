@@ -18,7 +18,7 @@ class TrafficDataset(Dataset):
     randomize=False: 기존처럼 순서대로,
     randomize=True: __getitem__마다 self.starts에서 랜덤 샘플링.
     """
-    def __init__(self, traffic_data, window=12, week_steps=480*7, randomize: bool = False):
+    def __init__(self, traffic_data, window=12, week_steps=480*7, randomize=False):
         super().__init__()
         self.traffic    = traffic_data      # (T_total, E, C_all) as NumPy
         self.window     = window
