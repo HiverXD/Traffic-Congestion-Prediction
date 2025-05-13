@@ -151,9 +151,13 @@ class DCRNN(nn.Module):
 class TemporalConv(nn.Module):
     def __init__(self, in_c, out_c, k):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_c, out_c, (1, k))
-        self.conv2 = nn.Conv2d(in_c, out_c, (1, k))
-        self.conv3 = nn.Conv2d(in_c, out_c, (1, k))
+        # time-dim 패딩: (height_pad, width_pad)
+        # height_pad=0 (node 차원에는 패딩 없음),
+        # width_pad=(k-1)//2 로 중앙정렬 패딩
+        pad = (0, (k-1)//2)
+        self.conv1 = nn.Conv2d(in_c, out_c, (1, k), padding=pad)
+        self.conv2 = nn.Conv2d(in_c, out_c, (1, k), padding=pad)
+        self.conv3 = nn.Conv2d(in_c, out_c, (1, k), padding=pad)
 
     def forward(self, x):
         # x: [B, T, N, F] → [B, F, N, T]
