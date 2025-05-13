@@ -4,6 +4,7 @@ import torch
 from torch.cuda.amp import GradScaler, autocast
 from IPython.display import clear_output, display
 import matplotlib.pyplot as plt
+from tqdm.auto import tqdm
 
 from dataset.dataset_config import edge_index, edge_attr
 
@@ -69,14 +70,20 @@ class Trainer:
         self.fig.canvas.draw()
 
     def fit(self):
-        for epoch in range(1, self.epochs + 1):
+        for epoch in tqdm(range(1, self.epochs + 1), desc="Epoch", leave=False):
             # === Training ===
             self.model.train()
             total_loss = 0.0
             total_mape = 0.0
             n = 0
 
-            for x_batch, y_batch in self.train_loader:
+            # 배치별 진행률 표시
+            for x_batch, y_batch in tqdm(
+                self.train_loader,
+                desc=f"Train {epoch}/{self.epochs}",
+                leave=False,
+                total=len(self.train_loader)
+            ):
                 # (x_batch: [B, T, E, D_in], y_batch: [B, n_pred, E, D_out])
                 x_batch = x_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
@@ -105,8 +112,14 @@ class Trainer:
             val_mape = 0.0
             n_val = 0
 
+            # 배치별 진행률 표시
             with torch.no_grad():
-                for x_batch, y_batch in self.valid_loader:
+                for x_batch, y_batch in tqdm(
+                    self.valid_loader,
+                    desc=f"Valid {epoch}/{self.epochs}",
+                    leave=False,
+                    total=len(self.valid_loader)
+                ):
                     x_batch = x_batch.to(self.device)
                     y_batch = y_batch.to(self.device)
 
