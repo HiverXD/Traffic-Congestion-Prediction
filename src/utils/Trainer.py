@@ -128,13 +128,15 @@ class Trainer:
             self.history['valid_mape'].append(valid_mape)
 
             # 출력 및 플롯
-            if epoch % self.print_interval == 0:
-                print(f"[Epoch {epoch}] "
-                      f"Train Loss={train_loss:.4f}, Valid Loss={valid_loss:.4f}, "
-                      f"Train MAPE={train_mape:.4f}, Valid MAPE={valid_mape:.4f}")
-
-            if epoch % self.plot_interval == 0:
-                self.plot_live(epoch)
+            if self.print_interval != 0:
+                if epoch % self.print_interval == 0:
+                    print(f"[Epoch {epoch}] "
+                        f"Train Loss={train_loss:.4f}, Valid Loss={valid_loss:.4f}, "
+                        f"Train MAPE={train_mape:.4f}, Valid MAPE={valid_mape:.4f}")
+                    
+            if self.plot_interval != 0:
+                if epoch % self.plot_interval == 0:
+                    self.plot_live(epoch)
 
             # Early Stopping
             if valid_loss < self.best_val_loss:
