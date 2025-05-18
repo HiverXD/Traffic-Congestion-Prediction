@@ -3,9 +3,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import ChebConv, MessagePassing
+from torch_geometric.nn import ChebConv, MessagePassing, GATConv
 
-__all__ = ['GCNMLP', 'DCRNN', 'STGCN', 'MLPBASED']
+__all__ = ['GCNMLP', 'DCRNN', 'STGCN', 'MLPBASED', 'STGAT']
 
 #
 # 1) GCN + MLP 분류/회귀 모델
@@ -668,3 +668,89 @@ class ResidualMLPBaseline(nn.Module):
         out = self.fc_out(h)         # [B, n_pred*E*D_out]
         out = out.view(B, self.n_pred, self.E, self.D_out)
         return out
+
+class STGATBlock(nn.Module):
+    """
+    Spatio-Temporal Graph Attention Block:
+      1) TemporalConv → 2) GATConv → 3) TemporalConv → BatchNorm
+    """
+    def __init__(self, in_c, hidden_c, out_c, k_sz, heads=4, concat=False):
+        super().__init__()
+        # 1) 시간축 합성곱
+        self.temp1 = TemporalConv(in_c, hidden_c, k_sz)
+        # 2) 그래프 어텐션
+        #    concat=False 로 하면 out_features=hidden_c
+        self.gat = GATConv(hidden_c, hidden_c, heads=heads, concat=concat)
+        # 3) 다시 시간축 합성곱
+        self.temp2 = TemporalConv(hidden_c, out_c, k_sz)
+        # BatchNorm on [B, C, N, T]
+        self.bn    = nn.BatchNorm2d(hidden_c)
+
+    def forward(self, x, edge_index, edge_attr=None):
+        # x: [B, T, N, F]
+        t1 = self.temp1(x)  # → [B, T, N, hidden_c]
+        B, T1, N, C = t1.shape
+
+        # edge_weight: 스칼라 거리 정보만 사용
+        if edge_attr is not None and edge_attr.dim()==2:
+            edge_weight = edge_attr[:,0]
+        else:
+            edge_weight = edge_attr
+
+        # GATConv 은 노드별 독립 처리이므로 batch loop
+        out = torch.zeros(B, T1, N, C, device=x.device)
+        for b in range(B):
+            for t in range(T1):
+                out[b,t] = self.gat(t1[b,t], edge_index, edge_weight)
+
+        out = F.relu(out)
+        out = self.temp2(out)
+        # [B, T1, N, out_c] → [B, out_c, N, T1] for BatchNorm2d
+        out_bn = out.permute(0,3,2,1)
+        out_bn = self.bn(out_bn)
+        return out_bn.permute(0,3,2,1)
+
+
+class STGAT(nn.Module):
+    """
+    STGAT: STGCN의 ChebConv → GATConv 대체 버전
+    """
+    def __init__(
+        self,
+        num_nodes: int,
+        node_feature_dim: int,
+        pred_node_dim: int,
+        n_pred: int = 1,
+        encoder_embed_dim: int = 64,
+        encoder_depth: int = 2,
+        kernel_size: int = 3,
+        heads: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.n_pred = n_pred
+
+        # STGAT Block 쌓기
+        blocks = []
+        for i in range(encoder_depth):
+            in_c  = node_feature_dim if i==0 else encoder_embed_dim
+            out_c = encoder_embed_dim
+            blocks.append(
+                STGATBlock(in_c, hidden_c=encoder_embed_dim, out_c=out_c,
+                           k_sz=kernel_size, heads=heads, concat=False)
+            )
+        self.blocks  = nn.ModuleList(blocks)
+        self.dropout = nn.Dropout(dropout)
+        self.pred    = nn.Linear(encoder_embed_dim, pred_node_dim)
+
+    def forward(self, x, edge_index, edge_attr=None):
+        # x: [B, T, N, D_in]
+        h = x
+        for block in self.blocks:
+            h = block(h, edge_index, edge_attr)
+            h = self.dropout(h)
+        # 시간축 평균 → [B, N, embed]
+        h_mean = h.mean(dim=1)
+        out1   = self.pred(h_mean)               # [B, N, D_out]
+        # 복제 → [B, n_pred, N, D_out]
+        return out1.unsqueeze(1).repeat(1, self.n_pred, 1, 1)
