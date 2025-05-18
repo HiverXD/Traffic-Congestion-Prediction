@@ -10,6 +10,7 @@ __all__ = ['GCNMLP', 'DCRNN', 'STGCN', 'MLPBASED']
 #
 # 1) GCN + MLP 분류/회귀 모델
 #
+
 class GCNMLP(nn.Module):
     def __init__(
         self,
@@ -26,12 +27,20 @@ class GCNMLP(nn.Module):
         super().__init__()
         self.num_nodes = num_nodes
         self.n_pred    = n_pred
+
+        # 1) 입력 임베딩
         self.embed = nn.Linear(node_feature_dim, encoder_embed_dim)
+
+        # 2) K-차 핸드셰이크 그래프 컨브
         self.convs = nn.ModuleList([
             ChebConv(encoder_embed_dim, encoder_embed_dim, K=2)
             for _ in range(encoder_depth)
         ])
+
         self.dropout = nn.Dropout(dropout)
+
+        # 3) 엣지별 MLP
+        #    마지막 out_features = pred_node_dim (각 스텝당 D_out)
         self.mlp = nn.Sequential(
             nn.Linear(encoder_embed_dim, mlp_hidden_dim),
             nn.ReLU(),
@@ -42,21 +51,29 @@ class GCNMLP(nn.Module):
     def forward(self, x, edge_index, edge_attr=None):
         # x: [B, T, E, D_in] or [B, E, D_in]
         if x.dim() == 4:
-            x = x.mean(dim=1)               # [B, E, D_in]
+            # 시계열 차원은 평균 풀링(필요시 Conv1d/GRU 등으로 대체 가능)
+            x = x.mean(dim=1)  # → [B, E, D_in]
+
         B, E, D = x.shape
-        h = self.embed(x)                  # [B, E, embed]
-        h = h.view(B*E, -1)
+        # 1) 노드별 임베딩
+        h = self.embed(x)      # [B, E, embed_dim]
+        h = h.view(B * E, -1)  # [B*E, embed_dim]
+
+        # 2) 그래프 컨브 + 활성화 + 드롭아웃
         for conv in self.convs:
-            h = conv(h, edge_index)
+            h = conv(h, edge_index)  # edge_attr 있으면 세 번째 인자로 넘기세요
             h = F.relu(h)
             h = self.dropout(h)
-        h = h.view(B, E, -1).mean(dim=1)   # [B, embed]
-        out1 = self.mlp(h)                 # [B, pred_node_dim]
-        # multi-step 복제
-        out = out1.unsqueeze(1).repeat(1, self.n_pred, 1)  # [B, n_pred, pred_node_dim]
-        # 엣지 차원 삽입: [B, n_pred, E, D_out]
-        return out.unsqueeze(2).expand(-1, -1, E, -1)
 
+        # 3) 엣지별 예측치 계산
+        #    preds: [B*E, pred_node_dim]
+        preds = self.mlp(h)
+
+        # 4) reshape → [B, E, n_pred(=1), pred_node_dim]
+        out = preds.view(B, E, self.n_pred, -1)
+
+        # 5) 최종 순서 맞추기 → [B, n_pred, E, pred_node_dim]
+        return out.permute(0, 2, 1, 3)
 #
 # 2) DCRNN: Diffusion Conv + GRU 스타일 RNN
 #
