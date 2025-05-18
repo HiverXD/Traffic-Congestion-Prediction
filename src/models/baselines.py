@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import ChebConv, MessagePassing
 
-__all__ = ['GCNMLP', 'DCRNN', 'STGCN']
+__all__ = ['GCNMLP', 'DCRNN', 'STGCN', 'MLPBASED']
 
 #
 # 1) GCN + MLP 분류/회귀 모델
@@ -493,4 +493,98 @@ class STAEformer(nn.Module):
                 out.transpose(1, 3)
             )  # (batch_size, out_steps, num_nodes, output_dim)
 
+        return out
+
+class MLPBASED(nn.Module):
+    def __init__(self, T, E, D_in, n_pred, D_out, hidden_dim=256, dropout=0.1):
+        super().__init__()
+        self.n_pred, self.E, self.D_out = n_pred, E, D_out
+        self.network = nn.Sequential(
+            nn.Flatten(),  # B x (T*E*D_in)
+            nn.Linear(T * E * D_in, hidden_dim),
+            nn.Dropout(dropout),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 2*hidden_dim),
+            nn.Dropout(dropout),
+            nn.ReLU(),
+            nn.Linear(2*hidden_dim, 2*hidden_dim),
+            nn.Dropout(dropout),
+            nn.ReLU(),
+            nn.Linear(2*hidden_dim, hidden_dim),
+            nn.Dropout(dropout),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, n_pred * E * D_out)
+        )
+
+    def forward(self, x, edge_index=None, edge_attr=None):
+        # x: [B, T, E, D_in]
+        B = x.size(0)
+        out = self.network(x)
+        out = out.view(B, self.n_pred, self.E, self.D_out)
+        return out
+
+
+class ResidualMLPBlock(nn.Module):
+    def __init__(self, dim, dropout=0.1):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim)
+        self.ln1 = nn.LayerNorm(dim)
+        self.fc2 = nn.Linear(dim, dim)
+        self.ln2 = nn.LayerNorm(dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        # x: [B, *, dim]
+        residual = x
+        out = self.fc1(x)
+        out = self.ln1(out)
+        out = F.relu(out)
+        out = self.dropout(out)
+
+        out = self.fc2(out)
+        out = self.ln2(out)
+        out = F.relu(out)
+        out = self.dropout(out)
+
+        return out + residual
+
+
+class ResidualMLPBaseline(nn.Module):
+    def __init__(self, T, E, D_in, n_pred, D_out, hidden_dim=256, dropout=0.1):
+        super().__init__()
+        self.n_pred, self.E, self.D_out = n_pred, E, D_out
+        self.input_dim = T * E * D_in
+        self.hidden_dim = hidden_dim
+
+        # 입력을 hidden_dim 차원으로 투사
+        self.fc_in = nn.Linear(self.input_dim, hidden_dim)
+        self.ln_in = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+        # Residual 블록 3개
+        self.res_blocks = nn.Sequential(
+            ResidualMLPBlock(hidden_dim, dropout),
+            ResidualMLPBlock(hidden_dim, dropout),
+            ResidualMLPBlock(hidden_dim, dropout),
+        )
+
+        # 출력층
+        self.fc_out = nn.Linear(hidden_dim, n_pred * E * D_out)
+
+    def forward(self, x, edge_index=None, edge_attr=None):
+        # x: [B, T, E, D_in]
+        B = x.size(0)
+        # Flatten 및 프로젝션
+        h = x.view(B, -1)            # [B, T*E*D_in]
+        h = self.fc_in(h)            # [B, hidden_dim]
+        h = self.ln_in(h)
+        h = F.relu(h)
+        h = self.dropout(h)
+
+        # Residual MLP 블록
+        h = self.res_blocks(h)       # [B, hidden_dim]
+
+        # 예측치 생성
+        out = self.fc_out(h)         # [B, n_pred*E*D_out]
+        out = out.view(B, self.n_pred, self.E, self.D_out)
         return out
