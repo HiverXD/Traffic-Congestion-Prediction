@@ -112,6 +112,7 @@ class DConv(MessagePassing):
             nn.init.zeros_(self.bias)
 
     def forward(self, x, edge_index, edge_weight=None):
+        # x: [B, N, F], edge_weight: [E]
         B, N, F = x.shape
         out = torch.zeros(B, N, self.weight.size(2), device=x.device)
         H = x
@@ -125,16 +126,41 @@ class DConv(MessagePassing):
     def message(self, x_j, norm):
         return norm.unsqueeze(-1) * x_j
 
-class DCRNNLayer(nn.Module):
-    def __init__(self, in_c, out_c, K):
-        super().__init__()
-        self.dconv = DConv(in_c+out_c, out_c, K)
+
+class DCRNNLayer(MessagePassing):
+    def __init__(self, in_channels: int, out_channels: int, K: int, bias=True):
+        super().__init__(aggr="add")
+        self.K = K
+        self.in_channels  = in_channels    # = D_in + H (first) or H + H (later)
+        self.out_channels = out_channels   # = H
+        # weight[k]: from in_ch -> out_ch
+        self.weight = nn.Parameter(torch.Tensor(K, in_channels, out_channels))
+        self.bias   = nn.Parameter(torch.Tensor(out_channels)) if bias else None
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.weight)
+        if self.bias is not None:
+            nn.init.zeros_(self.bias)
 
     def forward(self, x, h, edge_index, edge_weight):
-        z = torch.sigmoid(self.dconv(torch.cat([x, h], dim=-1), edge_index, edge_weight))
-        r = torch.sigmoid(self.dconv(torch.cat([x, h], dim=-1), edge_index, edge_weight))
-        h_tilde = torch.tanh(self.dconv(torch.cat([x, r*h], dim=-1), edge_index, edge_weight))
-        return z * h + (1-z) * h_tilde
+        # x: [N, D_in], h: [N, H]
+        inp = torch.cat([x, h], dim=-1)           # [N, in_channels]
+        H   = inp.clone()                         # 초기 H = inp
+        # 0차 diffusion (self-loop)
+        out = inp @ self.weight[0]               # [N, out_channels]
+        # 이후 k=1..K-1 diffusion steps
+        for k in range(1, self.K):
+            H = self.propagate(edge_index, x=H, norm=edge_weight)  # [N, in_channels]
+            out = out + (H @ self.weight[k])                      # accumulate
+        if self.bias is not None:
+            out = out + self.bias
+        return out  # [N, out_channels]
+
+    def message(self, x_j, norm):
+        # norm: [E], x_j: [E, in_channels]
+        return norm.view(-1, 1) * x_j
+
 
 class DCRNN(nn.Module):
     def __init__(
@@ -149,40 +175,56 @@ class DCRNN(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
-        self.num_nodes = num_nodes
-        self.n_pred    = n_pred
-        self.layers = nn.ModuleList([
-            DCRNNLayer(
-                node_feature_dim if i==0 else encoder_embed_dim,
-                encoder_embed_dim, K
-            )
-            for i in range(encoder_depth)
-        ])
+        self.n_pred = n_pred
+        H = encoder_embed_dim
+
+        # 1) 각 레이어별 in_ch 계산
+        layers = []
+        for i in range(encoder_depth):
+            if i == 0:
+                in_ch = node_feature_dim + H   # 첫 레이어: D_in + H
+            else:
+                in_ch = H + H                  # 이후 레이어: H + H
+            layers.append(DCRNNLayer(in_channels=in_ch,
+                                     out_channels=H,
+                                     K=K))
+        self.layers = nn.ModuleList(layers)
+
         self.dropout = nn.Dropout(dropout)
-        self.pred = nn.Linear(encoder_embed_dim, pred_node_dim)
+        self.pred    = nn.Linear(H, pred_node_dim)
 
     def forward(self, x, edge_index, edge_attr=None):
-        # x: [B, T, N, D_in]
-        # edge_attr: [E, F_e] (거리 + 타입원핫)
-        # 우리는 edge_weight로 스칼라 거리만 사용할 것
+        # x: [B, T, N, D_in], edge_attr: [E, Fe] or [E]
         if edge_attr is not None and edge_attr.dim() == 2:
-            edge_weight = edge_attr[:, 0]        # 거리 값만
+            edge_weight = edge_attr[:, 0]
         else:
-            edge_weight = edge_attr              # 이미 스칼라인 경우
+            edge_weight = edge_attr
 
-        B, T, N, D = x.shape
-        h = torch.zeros(B, N, self.layers[0].dconv.weight.size(2), device=x.device)
+        B, T, N, D_in = x.shape
+        H = self.layers[0].out_channels
+
+        # 초기 hidden: zeros [B, N, H]
+        h = x.new_zeros(B, N, H)
+
+        # 2) 시간축 루프
         for t in range(T):
-            x_t = x[:, t]
-            for layer in self.layers:
-                h = layer(x_t, h, edge_index, edge_weight)
-                h = F.relu(h)
-                h = self.dropout(h)
-        # single-step 예측 [B, N, pred_dim]
-        out1 = self.pred(h)
-        # multi-step 복제 → [B, n_pred, N, pred_dim]
-        return out1.unsqueeze(1).repeat(1, self.n_pred, 1, 1)
+            x_t = x[:, t]  # [B, N, D_in]
+            h_next = []
+            for b in range(B):
+                x_b, h_b = x_t[b], h[b]  # 각각 [N, D_in], [N, H]
+                # 각 레이어 순차 적용
+                for layer in self.layers:
+                    h_b = layer(x_b, h_b, edge_index, edge_weight)
+                    h_b = F.relu(h_b)
+                    h_b = self.dropout(h_b)
+                    # 다음 레이어 입력으로 x_b←h_b, h_b stays h_b
+                    x_b = h_b
+                h_next.append(h_b)
+            h = torch.stack(h_next, dim=0)  # [B, N, H]
 
+        # 3) 마지막 hidden → multi-step 예측
+        out1 = self.pred(h)  # [B, N, pred_node_dim]
+        return out1.unsqueeze(1).repeat(1, self.n_pred, 1, 1)  # [B, n_pred, N, D_out]
 #
 # 3) STGCN: 시공간 합성곱 블록
 #
