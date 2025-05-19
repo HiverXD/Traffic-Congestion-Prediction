@@ -1,6 +1,9 @@
 import numpy as np
 from collections import deque
 
+dataset = np.load(r'dataset/traffic_dataset_13_smoothen.npy', allow_pickle=True)
+T_total, E, C_origin = dataset.shape
+
 day_steps = 480
 week_steps = day_steps * 7
 
