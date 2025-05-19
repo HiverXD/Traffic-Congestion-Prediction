@@ -4,6 +4,85 @@ import torch.nn as nn
 import torch
 from torchinfo import summary
 
+class moving_avg(nn.Module):
+    """
+    Moving average block to highlight the trend of time series
+    """
+    def __init__(self, kernel_size, stride):
+        super(moving_avg, self).__init__()
+        self.kernel_size = kernel_size
+        self.avg = nn.AvgPool1d(kernel_size=kernel_size, stride=stride, padding=0)
+
+    def forward(self, x):
+        # padding on the both ends of time series
+        front = x[:, 0:1, :].repeat(1, (self.kernel_size - 1) // 2, 1)
+        end = x[:, -1:, :].repeat(1, (self.kernel_size - 1) // 2, 1)
+        x = torch.cat([front, x, end], dim=1)
+        x = self.avg(x.permute(0, 2, 1))
+        x = x.permute(0, 2, 1)
+        return x
+
+
+class series_decomp(nn.Module):
+    """
+    Series decomposition block
+    """
+    def __init__(self, kernel_size):
+        super(series_decomp, self).__init__()
+        self.moving_avg = moving_avg(kernel_size, stride=1)
+
+    def forward(self, x):
+        moving_mean = self.moving_avg(x)
+        res = x - moving_mean
+        return res, moving_mean
+
+
+class DLinearTemporal(nn.Module):
+    def __init__(self, in_steps, out_steps, num_nodes, individual=True, kernel_size=12):
+        super().__init__()
+        self.decomp = series_decomp(kernel_size)
+        self.in_steps, self.out_steps = in_steps, out_steps
+        self.num_nodes = num_nodes
+        self.individual = individual
+
+        if individual:
+            self.lin_season = nn.ModuleList([
+                nn.Linear(in_steps, out_steps) for _ in range(num_nodes)
+            ])
+            self.lin_trend = nn.ModuleList([
+                nn.Linear(in_steps, out_steps) for _ in range(num_nodes)
+            ])
+        else:
+            self.lin_season = nn.Linear(in_steps, out_steps)
+            self.lin_trend  = nn.Linear(in_steps, out_steps)
+
+    def forward(self, x, dim=1):
+        # x: [B, in_steps, num_nodes, model_dim]
+        B, T, N, D = x.shape
+        # first collapse model_dim into channel (we do DLinear on each feature separately)
+        x = x.permute(0, 2, 3, 1).reshape(B*N*D, T)  # [B·N·D, T]
+        res, mean = self.decomp(x.unsqueeze(-1))  # decomp expects shape [B·N·D, T, 1]
+        res = res.squeeze(-1); mean = mean.squeeze(-1)
+
+        # apply linear
+        if self.individual:
+            # but now each node & each feature has its own linear?
+            # simplest is to ignore feature-dim and just apply same for each D
+            out_res = torch.stack([
+                self.lin_season[n](res[B*n*D:(B*(n+1)*D), :])  for n in range(N)
+            ], dim=1)  # [B, N, D, out_steps]
+            out_mean = torch.stack([
+                self.lin_trend[n](mean[B*n*D:(B*(n+1)*D), :])   for n in range(N)
+            ], dim=1)
+        else:
+            out_res  = self.lin_season(res)  # [B·N·D, out_steps]
+            out_mean = self.lin_trend(mean)
+
+        out = out_res + out_mean
+        out = out.view(B, N, D, self.out_steps).permute(0, 3, 1, 2)
+        # → [B, out_steps, num_nodes, model_dim]
+        return out
+
 
 class AttentionLayer(nn.Module):
     """Perform attention across the -2 dim (the -1 dim is `model_dim`).
@@ -110,7 +189,7 @@ class SelfAttentionLayer(nn.Module):
         return out
 
 
-class STAEformer(nn.Module):
+class custom_model(nn.Module):
     def __init__(
         self,
         num_nodes,
@@ -177,12 +256,16 @@ class STAEformer(nn.Module):
             self.temporal_proj = nn.Linear(in_steps, out_steps)
             self.output_proj = nn.Linear(self.model_dim, self.output_dim)
 
-        self.attn_layers_t = nn.ModuleList(
-            [
-                SelfAttentionLayer(self.model_dim, feed_forward_dim, num_heads, dropout)
-                for _ in range(num_layers)
-            ]
-        )
+        self.lin_layers_t = nn.ModuleList([
+        DLinearTemporal(
+        in_steps=self.in_steps,
+        out_steps=self.in_steps,   # keep same length so stacking works
+        num_nodes=self.num_nodes,
+        individual=False,
+        kernel_size=25
+    )
+    for _ in range(num_layers)
+])
 
         self.attn_layers_s = nn.ModuleList(
             [
@@ -191,14 +274,14 @@ class STAEformer(nn.Module):
             ]
         )
 
-    def forward(self, x):
+    def forward(self, x,edge_index=None,edge_attr=None):
         # x: (batch_size, in_steps, num_nodes, input_dim+tod+dow=3)
         batch_size = x.shape[0]
 
         if self.tod_embedding_dim > 0:
-            tod = x[..., 1]
+            tod = x[..., 3]/self.steps_per_day
         if self.dow_embedding_dim > 0:
-            dow = x[..., 2]
+            dow = x[..., 4]
         x = x[..., : self.input_dim]
 
         x = self.input_proj(x)  # (batch_size, in_steps, num_nodes, input_embedding_dim)
@@ -225,8 +308,8 @@ class STAEformer(nn.Module):
             features.append(adp_emb)
         x = torch.cat(features, dim=-1)  # (batch_size, in_steps, num_nodes, model_dim)
 
-        for attn in self.attn_layers_t:
-            x = attn(x, dim=1)
+        for lin in self.lin_layers_t: 
+            x = lin(x, dim=1)
         for attn in self.attn_layers_s:
             x = attn(x, dim=2)
         # (batch_size, in_steps, num_nodes, model_dim)
