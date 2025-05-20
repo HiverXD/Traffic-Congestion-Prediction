@@ -194,10 +194,10 @@ class custom_model(nn.Module):
         self,
         num_nodes,
         in_steps=12,
-        out_steps=12,
-        steps_per_day=288,
+        out_steps=3,
+        steps_per_day=480,
         input_dim=3,
-        output_dim=1,
+        output_dim=3,
         input_embedding_dim=24,
         tod_embedding_dim=24,
         dow_embedding_dim=24,
@@ -336,5 +336,5 @@ class custom_model(nn.Module):
 
 
 if __name__ == "__main__":
-    model = STAEformer(207, 12, 12)
+    model = custom_model(50, 12, 3)
     summary(model, [64, 12, 207, 3])
