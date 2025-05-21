@@ -25,6 +25,8 @@ class Trainer:
         auto_save: bool = False,
         save_dir: str = None
     ):
+        # 다음에 이어서 학습할 시작 epoch (1-based)
+        self.start_epoch = 1
         self.model = model.to(device)
         self.train_loader = train_loader
         self.valid_loader = valid_loader
@@ -79,8 +81,12 @@ class Trainer:
         self.fig.canvas.draw()
 
     def fit(self):
-        for epoch in tqdm(range(1, self.epochs + 1), desc="Epoch", leave=False):
+        # 전체 추가할 epoch 수만큼, start_epoch부터 연속으로 진행
+        for epoch in tqdm(range(self.start_epoch,
+                                 self.start_epoch + self.epochs),
+                         desc="Epoch", leave=False):
             # === Training ===
+            self.current_epoch = epoch
             self.model.train()
             total_loss = 0.0
             total_mape = 0.0
@@ -157,7 +163,8 @@ class Trainer:
                         f"Train MAPE={train_mape:.4f}, Valid MAPE={valid_mape:.4f}")
                     
             if self.plot_interval != 0:
-                if epoch % self.plot_interval == 0:
+                if (epoch - self.start_epoch + 1) % self.plot_interval == 0:
+                    # plot_live expects total epoch count
                     self.plot_live(epoch)
 
             # Early Stopping
@@ -181,3 +188,31 @@ class Trainer:
 
     def get_history(self):
         return self.history
+
+    def load_checkpoint(self, state_dict: dict, history: dict = None):
+        """
+        외부에서 준비된 model.state_dict()와 선택적 history를 받아서
+        이어 학습할 준비를 합니다.
+        - state_dict: model.state_dict()
+        - history: {'train_loss':[...], 'valid_loss':[...], ...}, optional
+        """
+        # 1) 모델 가중치 로드
+        self.model.load_state_dict(state_dict)
+
+        # 2) 과거 기록(history) 복원
+        if history is not None:
+            self.history = history
+            # best_val_loss는 기록된 valid_loss 중 최소로 설정
+            self.best_val_loss = min(history.get('valid_loss', [float('inf')]))
+            # 시작 epoch = 기존 기록 길이 + 1
+            self.start_epoch = len(history.get('train_loss', [])) + 1
+        else:
+            # 새로운 history로 시작
+            self.history = {
+                'train_loss': [], 'valid_loss': [],
+                'train_mape': [], 'valid_mape': []
+            }
+            self.best_val_loss = float('inf')
+            self.start_epoch = 1
+
+        print(f"[Trainer] Loaded checkpoint. Resuming from epoch {self.start_epoch}.")
