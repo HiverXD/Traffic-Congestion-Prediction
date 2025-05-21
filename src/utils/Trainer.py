@@ -5,6 +5,7 @@ from torch.cuda.amp import GradScaler, autocast
 from IPython.display import clear_output, display
 import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
+import os
 
 from dataset.dataset_config import edge_index, edge_attr
 
@@ -20,7 +21,9 @@ class Trainer:
         device: str = 'cuda',
         print_interval: int = 1,
         plot_interval: int = 1,
-        early_stopping_patience: int = 5,
+        early_stopping_patience: int = 3,
+        auto_save: bool = False,
+        save_dir: str = None
     ):
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -32,6 +35,12 @@ class Trainer:
         self.print_interval = print_interval
         self.plot_interval = plot_interval
         self.early_stopping_patience = early_stopping_patience
+        # 자동 저장 기능
+        self.auto_save = auto_save
+        if save_dir is None:
+            save_dir = os.getcwd()
+        os.makedirs(save_dir, exist_ok=True)
+        self.save_dir = save_dir
 
         # edge_index/edge_attr 텐서로 변환 & device 이동
         self.edge_index = torch.from_numpy(edge_index).long().to(device)
@@ -153,8 +162,17 @@ class Trainer:
 
             # Early Stopping
             if valid_loss < self.best_val_loss:
-                self.best_val_loss = valid_loss
                 self.no_improve = 0
+
+                self.best_val_loss = valid_loss
+                # --- Auto-Save on improvement ---
+                if self.auto_save:
+                    # 모델 이름 + epoch + valid loss 로 파일명 구성
+                    model_name = self.model.__class__.__name__
+                    filename = f"{model_name}_epoch{epoch:03d}_val{valid_loss:.4f}.pth"
+                    path = os.path.join(self.save_dir, filename)
+                    torch.save(self.model.state_dict(), path)
+                    
             else:
                 self.no_improve += 1
                 if self.no_improve >= self.early_stopping_patience:
