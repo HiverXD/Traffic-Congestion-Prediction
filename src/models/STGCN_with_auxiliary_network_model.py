@@ -63,45 +63,37 @@ class STGCNWithAux(nn.Module):
         slot_id  = dow.long() * self.D + tod_step               # 0~3359
         return slot_id  # [B,T,E]
 
-    def _query_aux(self, slot_id: torch.Tensor) -> torch.Tensor:
+    def _query_aux(self, slot_id):
         """
         slot_id: [B, T_in, E]  (int64)
         returns: aux_emb [B, E, H]
         """
         B, T_in, E = slot_id.shape
-        C_in = self.aux_data.size(2)   # e.g. 3
 
-        # 1) 기준 시점은 배치의 0번째 타임스텝
-        s0 = slot_id[:, 0, :]          # [B, E]
+        # 1) 기준 시점만: slot_id[:,0] → s0
+        s0 = slot_id[:, 0, :]  # [B, E]
 
-        # 2) 3주치 인덱스 계산
-        idxs = torch.stack([
-            s0,
-            s0 + self.W,
-            s0 + 2 * self.W
-        ], dim=-1)                     # [B, E, 3]
-        idxs = idxs % self.aux_data.size(0)
+        # 2) 3주치 time idx 생성 (no nonzero)
+        offs = torch.tensor([0, self.W, 2*self.W], device=s0.device)
+        idxs = (s0.unsqueeze(-1) + offs.unsqueeze(0)) % self.aux_data.size(0)  # [B, E, 3]
 
-        # 3) 노드 인덱스 만들기
-        device = idxs.device
-        node_idx = torch.arange(E, device=device)  # [E]
+        # 3) aux_data: [T_aux, E, C] → [E, C, T_aux]
+        aux = self.aux_data.permute(1,2,0)  # [E, C, T_aux]
+        # expand once: [B, E, C, T_aux]
+        aux = aux.unsqueeze(0).expand(B, -1, -1, -1)
 
-        # 4) 배치별로 slice & trend-encode
-        z_list = []
-        for b in range(B):
-            tb = idxs[b]  # [E, 3]
-            # 각 노드에 대해 3지점 데이터를 꺼내 [E, C_in]
-            v0 = self.aux_data[tb[:, 0], node_idx]  # [E, C_in]
-            v1 = self.aux_data[tb[:, 1], node_idx]
-            v2 = self.aux_data[tb[:, 2], node_idx]
-            # 시간축 차원으로 스택 → [E, C_in, 3]
-            aux_tensor = torch.stack([v0, v1, v2], dim=-1)
-            # NodeTrendEncoder에 넘겨서 [E, H] 얻기
-            z_b = self.trend_enc(aux_tensor)        # [E, H]
-            z_list.append(z_b)
+        # 4) gather로 한 번에 뽑기 (no aten::index)
+        # idxs: [B,E,3] → expand to [B,E,C,3]
+        idxs_exp = idxs.unsqueeze(2).expand(-1,-1,aux.size(2),-1)
+        slice_ = aux.gather(dim=3, index=idxs_exp)  # [B, E, C, 3]
 
-        # 5) 배치로 스택 → [B, E, H]
-        return torch.stack(z_list, dim=0)
+        # 5) batch화된 trend_enc
+        BE, C = B*E, slice_.size(2)
+        # reshape [B*E, C, 3]
+        X = slice_.reshape(BE, C, 3)
+        Z = self.trend_enc(X)         # [B*E, H]
+        return Z.view(B, E, -1)       # [B, E, H]
+
 
     def forward(self, x, edge_index, edge_attr):
         # x: [B, T_in, E, 5] (vol,dens,flow,tod,dow)
