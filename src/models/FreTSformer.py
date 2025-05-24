@@ -5,89 +5,129 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.graphgym.config import cfg
 from torchinfo import summary
+import numpy as np
 
-class moving_avg(nn.Module):
-    """
-    Moving average block to highlight the trend of time series
-    """
-    def __init__(self, kernel_size, stride):
-        super(moving_avg, self).__init__()
-        self.kernel_size = kernel_size
-        self.avg = nn.AvgPool1d(kernel_size=kernel_size, stride=stride, padding=0)
+class FreTS(nn.Module):
+    def __init__(self, in_steps, out_steps, num_nodes, input_dim):
+        super().__init__()
+        self.embed_size = 128
+        self.hidden_size = 256
+        self.pre_length = out_steps
+        self.seq_length = in_steps
+
+        # 시공간 그래프 관련 변수 추가 및 재정의
+        self.num_nodes = num_nodes
+        self.input_dim = input_dim # 각 노드당 기본 특성 차원 (input_dim + tod + dow)
+
+        # self.feature_size는 기존 코드의 'Channel' 개념과 유사하게 사용됩니다.
+        # 이제 각 노드의 각 input_dim 특성이 독립적인 '채널'처럼 처리됩니다.
+        self.feature_size = self.input_dim
+
+        self.sparsity_threshold = 0.01
+        self.scale = 0.02
+        self.embeddings = nn.Parameter(torch.randn(1, self.embed_size))
+
+        self.r2 = nn.Parameter(self.scale * torch.randn(self.embed_size, self.embed_size))
+        self.i2 = nn.Parameter(self.scale * torch.randn(self.embed_size, self.embed_size))
+        self.rb2 = nn.Parameter(self.scale * torch.randn(self.embed_size))
+        self.ib2 = nn.Parameter(self.scale * torch.randn(self.embed_size))
+
+        self.fc = nn.Sequential(
+            nn.Linear(self.seq_length * self.embed_size, self.hidden_size),
+            nn.LeakyReLU(),
+            nn.Linear(self.hidden_size, self.pre_length)
+        )
+
+    # dimension extension
+    def tokenEmb(self, x):
+        # x: [Batch, In_steps, Num_nodes, Input_dim]
+        B, T, N, D_in = x.shape
+
+        # 목표: [B, (N*D_in), T, D_embed] 형태로 만들기
+        # 1. [B, N, D_in, T]로 permute
+        x = x.permute(0, 2, 3, 1)
+
+        # 2. N과 D_in 차원을 합쳐서 (N*D_in) 크기의 새로운 '채널' 차원 생성
+        x = x.reshape(B, N * D_in, T)
+
+        # 3. 임베딩을 위해 마지막 차원 (T) 옆에 1을 추가 [B, N*D_in, T, 1]
+        x = x.unsqueeze(3)
+
+        # self.embeddings: [1, embed_size]
+        y = self.embeddings
+        
+        # 브로드캐스팅을 통해 [B, N*D_in, T, embed_size] 결과 생성
+        return x * y
+
+    # frequency temporal learner
+    def MLP_temporal(self, x, B, N_channels_total, L):
+        # x: [B, N_channels_total, T, D_embed]
+        x = torch.fft.rfft(x, dim=2, norm='ortho') # FFT on L (time) dimension
+        y = self.FreMLP(B, N_channels_total, L, x, self.r2, self.i2, self.rb2, self.ib2)
+        x = torch.fft.irfft(y, n=self.seq_length, dim=2, norm="ortho")
+        return x
+
+    # frequency-domain MLPs (FreMLP는 입력 차원만 잘 들어오면 내부 로직 변경 불필요)
+    def FreMLP(self, B, nd, dimension, x, r, i, rb, ib):
+        o1_real = torch.zeros([B, nd, dimension // 2 + 1, self.embed_size],
+                              device=x.device)
+        o1_imag = torch.zeros([B, nd, dimension // 2 + 1, self.embed_size],
+                              device=x.device)
+
+        o1_real = F.relu(
+            torch.einsum('bijd,dd->bijd', x.real, r) - \
+            torch.einsum('bijd,dd->bijd', x.imag, i) + \
+            rb
+        )
+
+        o1_imag = F.relu(
+            torch.einsum('bijd,dd->bijd', x.imag, r) + \
+            torch.einsum('bijd,dd->bijd', x.real, i) + \
+            ib
+        )
+
+        y = torch.stack([o1_real, o1_imag], dim=-1)
+        y = F.softshrink(y, lambd=self.sparsity_threshold)
+        y = torch.view_as_complex(y)
+        return y
 
     def forward(self, x):
-        # padding on the both ends of time series
-        front = x[:, 0:1, :].repeat(1, (self.kernel_size - 1) // 2, 1)
-        end = x[:, -1:, :].repeat(1, (self.kernel_size - 1) // 2, 1)
-        x = torch.cat([front, x, end], dim=1)
-        x = self.avg(x.permute(0, 2, 1))
-        x = x.permute(0, 2, 1)
+        # x: [Batch, In_steps (T), Num_nodes (N), Input_dim (D_in)]
+        B, T, N, D_in = x.shape
+
+        # embedding x: [B, (N*D_in), T, D_embed]
+        x = self.tokenEmb(x)
+        bias = x
+
+        # 시간 축 연산만 수행
+        # N 인자에 (Num_nodes * Input_dim)을 전달
+        x = self.MLP_temporal(x, B, N * D_in, T)
+
+        x = x + bias
+
+        # Final FC layer for prediction
+        # x: [B, (N*D_in), T, D_embed]
+        # reshape: [B, (N*D_in), T*D_embed]
+        x = self.fc(x.reshape(B, N * D_in, -1))
+        # Output: [B, (N*D_in), pre_length]
+
+        # 최종 출력 형태를 [Batch, pre_length, num_nodes, input_dim]으로 재구성
+        # 1. pre_length를 두 번째 차원으로 가져오기
+        x = x.permute(0, 2, 1) # [B, pre_length, (N*D_in)]
+
+        # 2. Num_nodes와 Input_dim으로 다시 분리
+        x = x.reshape(B, self.pre_length, N, D_in)
+
         return x
 
 
-class series_decomp(nn.Module):
-    """
-    Series decomposition block
-    """
-    def __init__(self, kernel_size):
-        super(series_decomp, self).__init__()
-        self.moving_avg = moving_avg(kernel_size, stride=1)
-
-    def forward(self, x):
-        moving_mean = self.moving_avg(x)
-        res = x - moving_mean
-        return res, moving_mean
-
-
-class DLinearTemporal(nn.Module):
-    def __init__(self, in_steps, out_steps, num_nodes, individual=True, kernel_size=12):
-        super().__init__()
-        self.decomp = series_decomp(kernel_size)
-        self.in_steps, self.out_steps = in_steps, out_steps
-        self.num_nodes = num_nodes
-        self.individual = individual
-
-        if individual:
-            self.lin_season = nn.ModuleList([
-                nn.Linear(in_steps, out_steps) for _ in range(num_nodes)
-            ])
-            self.lin_trend = nn.ModuleList([
-                nn.Linear(in_steps, out_steps) for _ in range(num_nodes)
-            ])
-        else:
-            self.lin_season = nn.Linear(in_steps, out_steps)
-            self.lin_trend  = nn.Linear(in_steps, out_steps)
-
-    def forward(self, x, dim=1):
-        # x: [B, in_steps, num_nodes, model_dim]
-        B, T, N, D = x.shape
-        # first collapse model_dim into channel (we do DLinear on each feature separately)
-        x = x.permute(0, 2, 3, 1).reshape(B*N*D, T)  # [B·N·D, T]
-        res, mean = self.decomp(x.unsqueeze(-1))  # decomp expects shape [B·N·D, T, 1]
-        res = res.squeeze(-1); mean = mean.squeeze(-1)
-
-        # apply linear
-        if self.individual:
-            # but now each node & each feature has its own linear?
-            # simplest is to ignore feature-dim and just apply same for each D
-            out_res = torch.stack([
-                self.lin_season[n](res[B*n*D:(B*(n+1)*D), :])  for n in range(N)
-            ], dim=1)  # [B, N, D, out_steps]
-            out_mean = torch.stack([
-                self.lin_trend[n](mean[B*n*D:(B*(n+1)*D), :])   for n in range(N)
-            ], dim=1)
-        else:
-            out_res  = self.lin_season(res)  # [B·N·D, out_steps]
-            out_mean = self.lin_trend(mean)
-
-        out = out_res + out_mean
-        out = out.view(B, N, D, self.out_steps).permute(0, 3, 1, 2)
-        # → [B, out_steps, num_nodes, model_dim]
-        return out
 
 
 
-#class StaticSpexphormerAttention(nn.Module):
+
+
+
+class StaticSpexphormerAttention(nn.Module):
     
     def __init__(self, in_dim, out_dim, num_heads, use_bias=False):
 
@@ -452,7 +492,7 @@ class SelfAttentionLayer(nn.Module):
         return out
 
 
-class custom_model(nn.Module):
+class FreTSformer(nn.Module):
     def __init__(
         self,
         num_nodes,
@@ -524,12 +564,11 @@ class custom_model(nn.Module):
         #시간 축 연산
         self.lin_layers_t = nn.ModuleList(
             [
-                DLinearTemporal(
-                in_steps=self.in_steps,
-                out_steps=self.in_steps,   # keep same length so stacking works
-                num_nodes=self.num_nodes,
-                individual=False,
-                kernel_size=25
+                FreTS(
+                self.in_steps,
+                self.in_steps,   # keep same length so stacking works
+                self.num_nodes,
+                self.model_dim,
             )
             for _ in range(num_layers)
         ])
@@ -577,7 +616,7 @@ class custom_model(nn.Module):
         x = torch.cat(features, dim=-1)  # (batch_size, in_steps, num_nodes, model_dim)
 
         for lin in self.lin_layers_t: 
-            x = lin(x, dim=1)
+            x = lin(x)
         for attn in self.attn_layers_s:
             x = attn(x, dim=2)
         # (batch_size, in_steps, num_nodes, model_dim)
