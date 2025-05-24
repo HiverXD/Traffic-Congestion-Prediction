@@ -286,6 +286,7 @@ class STGCN(nn.Module):
         node_feature_dim: int,
         pred_node_dim: int,
         n_pred: int = 1,
+        in_steps: int = 12,
         encoder_embed_dim: int = 64,
         encoder_depth: int = 2,
         kernel_size: int = 3,
@@ -295,6 +296,7 @@ class STGCN(nn.Module):
         super().__init__()
         self.num_nodes = num_nodes
         self.n_pred    = n_pred
+        self.in_steps  = in_steps
         self.blocks = nn.ModuleList([
             STGCNBlock(
                 node_feature_dim if i==0 else encoder_embed_dim,
@@ -306,7 +308,10 @@ class STGCN(nn.Module):
             for i in range(encoder_depth)
         ])
         self.dropout = nn.Dropout(dropout)
-        self.pred = nn.Linear(encoder_embed_dim, pred_node_dim)
+        # 1) 채널 투영: H → D_out
+        self.pred_feat = nn.Linear(encoder_embed_dim, pred_node_dim)
+        # 2) 시간 투영: T → n_pred
+        self.pred_time = nn.Linear(in_steps, n_pred)
 
     def forward(self, x, edge_index, edge_attr=None):
         # x: [B, T, N, D_in]
@@ -314,11 +319,16 @@ class STGCN(nn.Module):
         for block in self.blocks:
             h = block(h, edge_index, edge_attr)
             h = self.dropout(h)
-        # h: [B, T_final, N, embed]
-        h_mean = h.mean(dim=1)            # [B, N, embed]
-        out1 = self.pred(h_mean)          # [B, N, D_out]
-        # multi-step 복제 → [B, n_pred, N, D_out]
-        return out1.unsqueeze(1).repeat(1, self.n_pred, 1, 1)
+        # h: [B, T, N, H]
+        # 1) 채널 차원 투영
+        h_feat = self.pred_feat(h)       # [B, T, N, D_out]
+        # 2) 시간 차원 투영 위해 순서 변경
+        #    [B, T, N, D_out] → [B, N, D_out, T]
+        h_temp = h_feat.permute(0, 2, 3, 1)
+        #    apply pred_time along last dim T → n_pred
+        out = self.pred_time(h_temp)     # [B, N, D_out, n_pred]
+        #    최종 순서 → [B, n_pred, N, D_out]
+        return out.permute(0, 3, 1, 2)
 
 
 class AttentionLayer(nn.Module):
@@ -721,6 +731,7 @@ class STGAT(nn.Module):
         node_feature_dim: int,
         pred_node_dim: int,
         n_pred: int = 1,
+        in_steps: int = 12,
         encoder_embed_dim: int = 64,
         encoder_depth: int = 2,
         kernel_size: int = 3,
@@ -729,6 +740,7 @@ class STGAT(nn.Module):
     ):
         super().__init__()
         self.n_pred = n_pred
+        self.in_steps = in_steps
 
         # STGAT Block 쌓기
         blocks = []
@@ -741,7 +753,10 @@ class STGAT(nn.Module):
             )
         self.blocks  = nn.ModuleList(blocks)
         self.dropout = nn.Dropout(dropout)
-        self.pred    = nn.Linear(encoder_embed_dim, pred_node_dim)
+        # 1) 채널 투영: H → D_out
+        self.pred_feat = nn.Linear(encoder_embed_dim, pred_node_dim)
+        # 2) 시간 투영: T → n_pred
+        self.pred_time = nn.Linear(in_steps, n_pred)
 
     def forward(self, x, edge_index, edge_attr=None):
         # x: [B, T, N, D_in]
@@ -749,8 +764,11 @@ class STGAT(nn.Module):
         for block in self.blocks:
             h = block(h, edge_index, edge_attr)
             h = self.dropout(h)
-        # 시간축 평균 → [B, N, embed]
-        h_mean = h.mean(dim=1)
-        out1   = self.pred(h_mean)               # [B, N, D_out]
-        # 복제 → [B, n_pred, N, D_out]
-        return out1.unsqueeze(1).repeat(1, self.n_pred, 1, 1)
+        # h: [B, T, N, H]
+        # 1) 채널 투영
+        h_feat = self.pred_feat(h)               # [B, T, N, D_out]
+        # 2) 시간 투영
+        h_temp = h_feat.permute(0, 2, 3, 1)       # [B, N, D_out, T]
+        out = self.pred_time(h_temp)             # [B, N, D_out, n_pred]
+        return out.permute(0, 3, 1, 2)            # [B, n_pred, N, D_out]
+
