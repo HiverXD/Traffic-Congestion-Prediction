@@ -27,6 +27,7 @@ class STGCNWithAux(nn.Module):
                  n_pred: int = 3,
                  encoder_embed_dim: int = 32,
                  aux_embed_dim: int = 32,
+                 encoder_depth: int = 1,
                  ):
         super().__init__()
         self.aux_H = aux_embed_dim
@@ -47,7 +48,8 @@ class STGCNWithAux(nn.Module):
             node_feature_dim=node_feature_dim - 2,   # 3 채널만 전달
             pred_node_dim=pred_node_dim,
             n_pred=n_pred,
-            encoder_embed_dim=encoder_embed_dim
+            encoder_embed_dim=encoder_embed_dim,
+            encoder_depth=encoder_depth
         )
         # 보조 데이터(3주치) 로드 → register_buffer
         self.register_buffer("aux_data", aux_data)
