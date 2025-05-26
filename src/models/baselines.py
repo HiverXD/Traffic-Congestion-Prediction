@@ -439,12 +439,12 @@ class SelfAttentionLayer(nn.Module):
 class STAEformer(nn.Module):
     def __init__(
         self,
-        num_nodes,
+        num_nodes =50,
         in_steps=12,
         out_steps=3,
         steps_per_day=480,
         input_dim=3,
-        output_dim=1,
+        output_dim=3,
         input_embedding_dim=24,
         tod_embedding_dim=24,
         dow_embedding_dim=24,
