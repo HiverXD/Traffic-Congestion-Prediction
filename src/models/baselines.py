@@ -292,6 +292,8 @@ class STGCN(nn.Module):
         kernel_size: int = 3,
         K: int = 2,
         dropout: float = 0.1,
+        num_channel_block: int = 0,  
+        num_time_block:    int = 0,   
     ):
         super().__init__()
         self.num_nodes = num_nodes
@@ -313,6 +315,24 @@ class STGCN(nn.Module):
         # 2) 시간 투영: T → n_pred
         self.pred_time = nn.Linear(in_steps, n_pred)
 
+        # 3) 채널 블록: [B, T, N, D_out] → [B, T, N, D_out]
+        self.channel_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(pred_node_dim, pred_node_dim),
+                nn.GELU()
+            )
+            for _ in range(num_channel_block)
+        ])
+
+        # 4) 시간 블록: [B, N, D_out, n_pred] → [B, N, D_out, n_pred]
+        self.time_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(n_pred, n_pred),
+                nn.GELU()
+            )
+            for _ in range(num_time_block)
+        ])
+
     def forward(self, x, edge_index, edge_attr=None):
         # x: [B, T, N, D_in]
         h = x
@@ -322,11 +342,18 @@ class STGCN(nn.Module):
         # h: [B, T, N, H]
         # 1) 채널 차원 투영
         h_feat = self.pred_feat(h)       # [B, T, N, D_out]
-        # 2) 시간 차원 투영 위해 순서 변경
+        # 2) 채널 블록 적용
+        for ch_block in self.channel_blocks:
+            h_feat = ch_block(h_feat)  # 유지된 shape: [B, T, N, D_out]
+        # 3) 시간 차원 투영 위해 순서 변경
         #    [B, T, N, D_out] → [B, N, D_out, T]
         h_temp = h_feat.permute(0, 2, 3, 1)
         #    apply pred_time along last dim T → n_pred
         out = self.pred_time(h_temp)     # [B, N, D_out, n_pred]
+        # 4) 시간 블록 적용
+        for tm_block in self.time_blocks:
+            out = tm_block(out)             # 유지된 shape: [B, N, D_out, n_pred]
+
         #    최종 순서 → [B, n_pred, N, D_out]
         return out.permute(0, 3, 1, 2)
 
@@ -737,6 +764,8 @@ class STGAT(nn.Module):
         kernel_size: int = 3,
         heads: int = 4,
         dropout: float = 0.1,
+        num_channel_block: int = 0,  
+        num_time_block:    int = 0,  
     ):
         super().__init__()
         self.n_pred = n_pred
@@ -758,6 +787,25 @@ class STGAT(nn.Module):
         # 2) 시간 투영: T → n_pred
         self.pred_time = nn.Linear(in_steps, n_pred)
 
+
+        # 3) 채널 블록: [B, T, N, D_out] → [B, T, N, D_out]
+        self.channel_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(pred_node_dim, pred_node_dim),
+                nn.GELU()
+            )
+            for _ in range(num_channel_block)
+        ])
+
+        # 4) 시간 블록: [B, N, D_out, n_pred] → [B, N, D_out, n_pred]
+        self.time_blocks = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(n_pred, n_pred),
+                nn.GELU()
+            )
+            for _ in range(num_time_block)
+        ])
+
     def forward(self, x, edge_index, edge_attr=None):
         # x: [B, T, N, D_in]
         h = x
@@ -767,8 +815,15 @@ class STGAT(nn.Module):
         # h: [B, T, N, H]
         # 1) 채널 투영
         h_feat = self.pred_feat(h)               # [B, T, N, D_out]
-        # 2) 시간 투영
+        # 2) 채널 블록 적용
+        for ch_block in self.channel_blocks:
+            h_feat = ch_block(h_feat)  # 유지된 shape: [B, T, N, D_out]
+
+        # 3) 시간 투영
         h_temp = h_feat.permute(0, 2, 3, 1)       # [B, N, D_out, T]
         out = self.pred_time(h_temp)             # [B, N, D_out, n_pred]
+        # 4) 시간 블록 적용
+        for tm_block in self.time_blocks:
+            out = tm_block(out)             # 유지된 shape: [B, N, D_out, n_pred]
         return out.permute(0, 3, 1, 2)            # [B, n_pred, N, D_out]
 
