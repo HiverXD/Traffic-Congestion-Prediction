@@ -116,15 +116,12 @@ class AttentionLayer(nn.Module):
 
     """
 
-    def __init__(self, model_dim, num_heads=8, mask=False,max_spatial_distance=50, num_edge_types_for_bias=10):
+    def __init__(self, model_dim, num_heads=8, mask=False):
         super().__init__()
 
         self.model_dim = model_dim
         self.num_heads = num_heads
         self.mask = mask
-
-        if model_dim % num_heads != 0:
-            raise ValueError("model_dim must be divisible by num_heads")
 
         self.head_dim = model_dim // num_heads
 
@@ -134,11 +131,7 @@ class AttentionLayer(nn.Module):
 
         self.out_proj = nn.Linear(model_dim, model_dim)
 
-
-        self.spatial_pos_encoder = nn.Embedding(max_spatial_distance + 1, num_heads, padding_idx=0)
-        self.edge_type_encoder_for_bias = nn.Embedding(num_edge_types_for_bias + 1, num_heads, padding_idx=0)
-
-    def forward(self, query, key, value, spatial_pos=None, edge_type=None):
+    def forward(self, query, key, value):
         # Q    (batch_size, ..., tgt_length, model_dim)
         # K, V (batch_size, ..., src_length, model_dim)
         batch_size = query.shape[0]
@@ -162,24 +155,6 @@ class AttentionLayer(nn.Module):
             query @ key
         ) / self.head_dim**0.5  # (num_heads * batch_size, ..., tgt_length, src_length)
 
-                # --- Add Graphormer Bias ---
-        if spatial_pos is not None and edge_type is not None:
-            # spatial_pos, edge_type are (B, T, N, N)
-            # Ensure inputs are long type for embedding lookup
-            spatial_bias_emb = self.spatial_pos_encoder(spatial_pos.long()) # (B, T, N, N, num_heads)
-            edge_type_bias_emb = self.edge_type_encoder_for_bias(edge_type.long()) # (B, T, N, N, num_heads)
-            
-            total_bias = spatial_bias_emb + edge_type_bias_emb # (B, T, N, N, num_heads)
-            
-            # Permute to (num_heads, B, T, N, N)
-            total_bias = total_bias.permute(4, 0, 1, 2, 3)
-            # Reshape to (num_heads * B, T, N, N) to match attn_score
-            # query.shape[1] is T (the "..." dimension)
-            total_bias = total_bias.reshape(self.num_heads * batch_size, query.shape[1], tgt_length, src_length)
-
-            attn_score = attn_score + total_bias
-        # --- End Graphormer Bias ---
-
         if self.mask:
             mask = torch.ones(
                 tgt_length, src_length, dtype=torch.bool, device=query.device
@@ -199,12 +174,11 @@ class AttentionLayer(nn.Module):
 
 class SelfAttentionLayer(nn.Module):
     def __init__(
-        self, model_dim, feed_forward_dim=2048, num_heads=8, dropout=0, mask=False, max_spatial_distance=50, num_edge_types_for_bias=10
+        self, model_dim, feed_forward_dim=2048, num_heads=8, dropout=0, mask=False
     ):
         super().__init__()
 
-        self.attn = AttentionLayer(model_dim, num_heads, mask,max_spatial_distance=max_spatial_distance,
-                                   num_edge_types_for_bias=num_edge_types_for_bias)
+        self.attn = AttentionLayer(model_dim, num_heads, mask)
         self.feed_forward = nn.Sequential(
             nn.Linear(model_dim, feed_forward_dim),
             nn.ReLU(inplace=True),
@@ -215,13 +189,11 @@ class SelfAttentionLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, x, dim=-2,spatial_pos_for_attn=None,
-                edge_type_for_attn_bias=None):
+    def forward(self, x, dim=-2):
         x = x.transpose(dim, -2)
         # x: (batch_size, ..., length, model_dim)
         residual = x
-        out = self.attn(x, x, x,spatial_pos=spatial_pos_for_attn,
-                        edge_type=edge_type_for_attn_bias)  # (batch_size, ..., length, model_dim)
+        out = self.attn(x, x, x)  # (batch_size, ..., length, model_dim)
         out = self.dropout1(out)
         out = self.ln1(residual + out)
 
@@ -254,11 +226,6 @@ class custom_model(nn.Module):
         num_layers=3,
         dropout=0.1,
         use_mixed_proj=True,
-                # --- Graphormer related parameters ---
-        degree_embedding_dim=16,
-        max_degree=100,
-        max_spatial_distance=50,
-        num_edge_types_for_bias=10,
     ):
         super().__init__()
 
@@ -273,14 +240,12 @@ class custom_model(nn.Module):
         self.dow_embedding_dim = dow_embedding_dim
         self.spatial_embedding_dim = spatial_embedding_dim
         self.adaptive_embedding_dim = adaptive_embedding_dim
-        self.degree_embedding_dim = degree_embedding_dim
         self.model_dim = (
             input_embedding_dim
             + tod_embedding_dim
             + dow_embedding_dim
             + spatial_embedding_dim
             + adaptive_embedding_dim
-            + (2 * degree_embedding_dim if degree_embedding_dim > 0 else 0)
         )
         self.num_heads = num_heads
         self.num_layers = num_layers
@@ -300,10 +265,6 @@ class custom_model(nn.Module):
             self.adaptive_embedding = nn.init.xavier_uniform_(
                 nn.Parameter(torch.empty(in_steps, num_nodes, adaptive_embedding_dim))
             )
-
-        if self.degree_embedding_dim > 0:
-            self.in_degree_encoder = nn.Embedding(max_degree + 1, degree_embedding_dim, padding_idx=0)
-            self.out_degree_encoder = nn.Embedding(max_degree + 1, degree_embedding_dim, padding_idx=0)
 
         if use_mixed_proj:
             self.output_proj = nn.Linear(
@@ -326,16 +287,12 @@ class custom_model(nn.Module):
 
         self.attn_layers_s = nn.ModuleList(
             [
-                SelfAttentionLayer(self.model_dim, feed_forward_dim, num_heads, dropout, max_spatial_distance=max_spatial_distance,
-                    num_edge_types_for_bias=num_edge_types_for_bias)
+                SelfAttentionLayer(self.model_dim, feed_forward_dim, num_heads, dropout)
                 for _ in range(num_layers)
             ]
         )
 
-    def forward(self, x,edge_index=None,edge_attr=None, in_degree=None,
-                out_degree=None,                # Expected shape: (B, N)
-                spatial_pos_bias_input=None,    # Expected shape: (B, N, N) for static graph
-                edge_type_bias_input=None)     # Expected shape: (B, N, N) for static graph):
+    def forward(self, x,edge_index=None,edge_attr=None):
         # x: (batch_size, in_steps, num_nodes, input_dim+tod+dow=3)
         batch_size = x.shape[0]
 
@@ -367,39 +324,12 @@ class custom_model(nn.Module):
                 size=(batch_size, *self.adaptive_embedding.shape)
             )
             features.append(adp_emb)
-
-        if self.degree_embedding_dim > 0 and in_degree is not None and out_degree is not None:
-            # Ensure degree tensors are on the same device as x
-            in_degree = in_degree.to(x.device)
-            out_degree = out_degree.to(x.device)
-            # in_degree/out_degree: (B, N) -> (B, 1, N, deg_emb_dim) -> (B, T, N, deg_emb_dim)
-            in_deg_expanded = in_degree.unsqueeze(1).repeat(1, self.in_steps, 1)
-            out_deg_expanded = out_degree.unsqueeze(1).repeat(1, self.in_steps, 1)
-            
-            in_degree_emb = self.in_degree_encoder(in_deg_expanded.long())
-            out_degree_emb = self.out_degree_encoder(out_deg_expanded.long())
-            features.append(in_degree_emb)
-            features.append(out_degree_emb)
-        
         x = torch.cat(features, dim=-1)  # (batch_size, in_steps, num_nodes, model_dim)
 
         for lin in self.lin_layers_t: 
             x = lin(x, dim=1)
-
-
-        
-        # Prepare bias inputs for attention layers by expanding time dimension
-        current_T = x.shape[1] # Should be self.in_steps after DLinear
-        _spatial_pos_for_attn = None
-        if spatial_pos_bias_input is not None:
-            _spatial_pos_for_attn = spatial_pos_bias_input.to(x.device).unsqueeze(1).repeat(1, current_T, 1, 1)
-        _edge_type_for_attn = None
-        if edge_type_bias_input is not None:
-            _edge_type_for_attn = edge_type_bias_input.to(x.device).unsqueeze(1).repeat(1, current_T, 1, 1) 
-        
-                   
         for attn in self.attn_layers_s:
-            x = attn(x, dim=2, spatial_pos_for_attn=_spatial_pos_for_attn, edge_type_for_attn_bias=_edge_type_for_attn)
+            x = attn(x, dim=2)
         # (batch_size, in_steps, num_nodes, model_dim)
 
         if self.use_mixed_proj:
