@@ -206,7 +206,7 @@ class SelfAttentionLayer(nn.Module):
         return out
 
 
-class custom_model(nn.Module):
+class STLinear(nn.Module):
     def __init__(
         self,
         num_nodes,

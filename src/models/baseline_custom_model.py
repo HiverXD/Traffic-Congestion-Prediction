@@ -335,7 +335,7 @@ class custom_model(nn.Module):
     def forward(self, x,edge_index=None,edge_attr=None, in_degree=None,
                 out_degree=None,                # Expected shape: (B, N)
                 spatial_pos_bias_input=None,    # Expected shape: (B, N, N) for static graph
-                edge_type_bias_input=None)     # Expected shape: (B, N, N) for static graph):
+                edge_type_bias_input=None):     # Expected shape: (B, N, N) for static graph)
         # x: (batch_size, in_steps, num_nodes, input_dim+tod+dow=3)
         batch_size = x.shape[0]
 
