@@ -266,7 +266,7 @@ class custom_model(nn.Module):
 
         self.edge_index = edge_index       # [2, E]
         self.rrwp = rrwp_encoding(self.edge_index, self.num_nodes, K=K)     # [E, K+1]
-        self.e_emb = RRWPEmbedding(K = 3, d_edge)(self.rrwp)                    # [E, d_edge]
+        self.e_emb = RRWPEmbedding(d_edge, K)(self.rrwp)                    # [E, d_edge]
 
 
         self.grit_attn_layers = nn.ModuleList([
