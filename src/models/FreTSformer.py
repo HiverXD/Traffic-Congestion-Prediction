@@ -381,5 +381,5 @@ class FreTSformer(nn.Module):
 
 
 if __name__ == "__main__":
-    model = custom_model(50, 12, 3)
+    model = FreTSformer(50, 12, 3)
     summary(model, [64, 12, 207, 3])
