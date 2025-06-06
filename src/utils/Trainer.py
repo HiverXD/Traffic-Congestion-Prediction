@@ -21,7 +21,7 @@ class Trainer:
         device: str = 'cuda',
         print_interval: int = 1,
         plot_interval: int = 1,
-        early_stopping_patience: int = 3,
+        early_stopping_patience: int = 6,
         auto_save: bool = False,
         save_dir: str = None
     ):
@@ -216,3 +216,6 @@ class Trainer:
             self.start_epoch = 1
 
         print(f"[Trainer] Loaded checkpoint. Resuming from epoch {self.start_epoch}.")
+    
+    def get_best_valid_loss(self):
+        return self.best_val_loss

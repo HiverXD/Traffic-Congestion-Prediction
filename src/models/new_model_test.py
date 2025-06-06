@@ -280,35 +280,35 @@ class STGRIT(nn.Module):
         
         def forward(self, x, edge_index=None):     
         
-        batch_size = x.shape[0]
+            batch_size = x.shape[0]
 
-        if self.tod_embedding_dim > 0:
-            tod = x[..., 3]/self.steps_per_day
-        if self.dow_embedding_dim > 0:
-            dow = x[..., 4]
-        x = x[..., : self.input_dim]
+            if self.tod_embedding_dim > 0:
+                tod = x[..., 3]/self.steps_per_day
+            if self.dow_embedding_dim > 0:
+                dow = x[..., 4]
+            x = x[..., : self.input_dim]
 
-        x = self.input_proj(x)  # (batch_size, in_steps, num_nodes, input_embedding_dim)
-        features = [x]
-        if self.tod_embedding_dim > 0:
-            tod_emb = self.tod_embedding(
-                (tod * self.steps_per_day).long()
-            )  # (batch_size, in_steps, num_nodes, tod_embedding_dim)
-            features.append(tod_emb)
-        if self.dow_embedding_dim > 0:
-            dow_emb = self.dow_embedding(
-                dow.long()
-            )  # (batch_size, in_steps, num_nodes, dow_embedding_dim)
-            features.append(dow_emb)
+            x = self.input_proj(x)  # (batch_size, in_steps, num_nodes, input_embedding_dim)
+            features = [x]
+            if self.tod_embedding_dim > 0:
+                tod_emb = self.tod_embedding(
+                    (tod * self.steps_per_day).long()
+                )  # (batch_size, in_steps, num_nodes, tod_embedding_dim)
+                features.append(tod_emb)
+            if self.dow_embedding_dim > 0:
+                dow_emb = self.dow_embedding(
+                    dow.long()
+                )  # (batch_size, in_steps, num_nodes, dow_embedding_dim)
+                features.append(dow_emb)
 
-        if self.adaptive_embedding_dim > 0:
-            adp_emb = self.adaptive_embedding.expand(
-                size=(batch_size, *self.adaptive_embedding.shape)
-            )
-            features.append(adp_emb)
+            if self.adaptive_embedding_dim > 0:
+                adp_emb = self.adaptive_embedding.expand(
+                    size=(batch_size, *self.adaptive_embedding.shape)
+                )
+                features.append(adp_emb)
 
-        
-        x = torch.cat(features, dim=-1)  # (batch_size, in_steps, num_nodes, model_dim)
+            
+            x = torch.cat(features, dim=-1)  # (batch_size, in_steps, num_nodes, model_dim)
 
-        for lin in self.lin_layers_t: 
-            x = lin(x, dim=1)
+            for lin in self.lin_layers_t: 
+                x = lin(x, dim=1)

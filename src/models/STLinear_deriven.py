@@ -254,7 +254,7 @@ class HopBiasedSelfAttentionLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-    def forward(self, x, dim=-2):
+    def forward(self, x, dim=-2, return_attn : bool =False) -> torch.Tensor:
         """
         x: (batch_size, ..., length, model_dim) 형태로 가정
            여기서는 주로 length=E (엣지 수)를 기준으로 Self‐Attention 수행
@@ -526,7 +526,7 @@ class SelfAttentionLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm = nn.LayerNorm(dim)
 
-    def forward(self, x: torch.Tensor, dim: int = 2) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, dim: int = 2, return_attn: bool = False) -> torch.Tensor:
         """
         • x: (B, T, E, dim) 형태 텐서
         • dim: Attention을 수행할 차원 ( 여기서는 기본값 2 → E 축 )
@@ -560,7 +560,11 @@ class SelfAttentionLayer(nn.Module):
         out = self.norm(x_flat + self.dropout(out))       # (B*T, E, dim)
 
         # 8) 원래 차원 (B, T, E, dim)으로 복원하여 반환
-        return out.view(B, T, E, D)
+
+        if return_attn:
+            return out.view(B, T, E, D), attn_weights.view(B, T, self.num_heads, E, E)
+        else:
+            return out.view(B, T, E, D)
 
 class SPEBiasedMultiHeadAttention(nn.Module):
     """
@@ -882,7 +886,7 @@ class STLinear_SPE(nn.Module):
         spe_tensor = spe_tensor.to(self._spe_buffer.device)
         self._spe_buffer = spe_tensor  # SPE 텐서 덮어쓰기
 
-    def forward(self, x: torch.Tensor, edge_index=None, edge_attr=None):
+    def forward(self, x: torch.Tensor, edge_index=None, edge_attr=None, return_attn: bool = False):
         """
         • x: (B, in_steps, E, input_dim + 2) 형태 (input_dim=3 → 마지막 두 채널이 TOD,DOW)
         • edge_index, edge_attr: Trainer에서 넘겨주지만, SPE 모델은 실제로 사용하지 않음
@@ -943,8 +947,13 @@ class STLinear_SPE(nn.Module):
 
         # 11) 공간 블록 반복 (Self-Attention)
         x_spatial = x_seq
+        attention_maps = [] if return_attn else None
         for attn in self.attn_layers_s:
-            x_spatial = attn(x_spatial, dim=2)  # (B, in_steps, E, model_dim)
+            if return_attn:
+                x_spatial, attn_weights = attn(x_spatial, dim=2, return_attn=True)
+                attention_maps.append(attn_weights)
+            else:
+                x_spatial = attn(x_spatial, dim=2)
 
         # 12) 최종 예측
         if self.use_mixed_proj:
@@ -958,4 +967,7 @@ class STLinear_SPE(nn.Module):
             out = self.temporal_proj(out)                   # → (B, model_dim, E, out_steps)
             out = self.output_proj(out.transpose(1, 3))     # → (B, out_steps, E, output_dim)
 
-        return out
+        if return_attn:
+            return out, attention_maps  # attention_maps: List of (B, T, H, E, E)
+        else:
+            return out
