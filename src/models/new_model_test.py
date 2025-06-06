@@ -1,10 +1,9 @@
-#STAEFORMER
-
 import torch.nn as nn
 import torch
 from torchinfo import summary
 import torch.nn.functional as F
 #from torch_scatter import scatter_add
+
 
 class moving_avg(nn.Module):
     """
@@ -84,8 +83,6 @@ class DLinearTemporal(nn.Module):
         out = out.view(B, N, D, self.out_steps).permute(0, 3, 1, 2)
         # → [B, out_steps, num_nodes, model_dim]
         return out
-
-
 
 # ---------- 1) RRWP Positional Encoding ----------
 def rrwp_encoding(edge_index, num_nodes, K=3):
@@ -187,12 +184,14 @@ class GRITAttention(nn.Module):
         return out
 
 
-class custom_model(nn.Module):
+
+class STGRIT(nn.Module):
     def __init__(
         self,
         num_nodes,
         kernel_size,
         edge_index,
+        d_edge,
         in_steps=12,
         out_steps=3,
         steps_per_day=480,
@@ -209,7 +208,6 @@ class custom_model(nn.Module):
         dropout=0.1,
         use_mixed_proj=True,
         K=3,
-        d_edge = 32,
         
     ):
         super().__init__()
@@ -226,15 +224,15 @@ class custom_model(nn.Module):
         self.dow_embedding_dim = dow_embedding_dim
         self.adaptive_embedding_dim = adaptive_embedding_dim
         
+        #converted_model_dim
         self.model_dim = (
             + tod_embedding_dim
             + dow_embedding_dim
             + adaptive_embedding_dim
         )
 
-        self.num_heads = num_heads
-        self.num_layers = num_layers
-        self.use_mixed_proj = use_mixed_proj
+
+        self.use_mixed_proj = use_mixed_proj #??
 
         if tod_embedding_dim > 0:
             self.tod_embedding = nn.Embedding(steps_per_day, tod_embedding_dim)
@@ -253,6 +251,8 @@ class custom_model(nn.Module):
             self.temporal_proj = nn.Linear(in_steps, out_steps)
             self.output_proj = nn.Linear(self.model_dim, self.output_dim)
 
+
+
         self.lin_layers_t = nn.ModuleList([
         DLinearTemporal(
         in_steps=self.in_steps,
@@ -264,20 +264,22 @@ class custom_model(nn.Module):
         for _ in range(num_layers)
         ])
 
+        #Spatial Attention module
         self.edge_index = edge_index       # [2, E]
         self.rrwp = rrwp_encoding(self.edge_index, self.num_nodes, K=K)     # [E, K+1]
-        self.e_emb = RRWPEmbedding(d_edge, K)(self.rrwp)                    # [E, d_edge]
+        self.e_emb = RRWPEmbedding(d_edge, K = 3)(self.rrwp)                    # [E, d_edge]
+        self.num_heads = num_heads
+        self.num_layers = num_layers
 
-
+        #Spatial GritAttention
         self.grit_attn_layers = nn.ModuleList([
             GRITAttention(self.model_dim, d_edge, num_heads)
             for _ in range(num_layers)
         ])
 
-    def forward(self, x,edge_index=None,edge_attr=None,
-                spatial_pos_bias_input=None,    # Expected shape: (B, N, N) for static graph
-                edge_type_bias_input=None):     # Expected shape: (B, N, N) for static graph)
-        # x: (batch_size, in_steps, num_nodes, input_dim+tod+dow=5)
+        
+        def forward(self, x, edge_index=None):     
+        
         batch_size = x.shape[0]
 
         if self.tod_embedding_dim > 0:
@@ -310,44 +312,3 @@ class custom_model(nn.Module):
 
         for lin in self.lin_layers_t: 
             x = lin(x, dim=1)
-
-
-        
-        # Prepare bias inputs for attention layers by expanding time dimension
-        current_T = x.shape[1] # Should be self.in_steps after DLinear
-        _spatial_pos_for_attn = None
-        if spatial_pos_bias_input is not None:
-            _spatial_pos_for_attn = spatial_pos_bias_input.to(x.device).unsqueeze(1).repeat(1, current_T, 1, 1)
-        _edge_type_for_attn = None
-        if edge_type_bias_input is not None:
-            _edge_type_for_attn = edge_type_bias_input.to(x.device).unsqueeze(1).repeat(1, current_T, 1, 1) 
-        
-                   
-        for attn in self.grit_attn_layers_s:
-            x = attn(x, dim=2, spatial_pos_for_attn=_spatial_pos_for_attn, edge_type_for_attn_bias=_edge_type_for_attn)
-        # (batch_size, in_steps, num_nodes, model_dim)
-
-        if self.use_mixed_proj:
-            out = x.transpose(1, 2)  # (batch_size, num_nodes, in_steps, model_dim)
-            out = out.reshape(
-                batch_size, self.num_nodes, self.in_steps * self.model_dim
-            )
-            out = self.output_proj(out).view(
-                batch_size, self.num_nodes, self.out_steps, self.output_dim
-            )
-            out = out.transpose(1, 2)  # (batch_size, out_steps, num_nodes, output_dim)
-        else:
-            out = x.transpose(1, 3)  # (batch_size, model_dim, num_nodes, in_steps)
-            out = self.temporal_proj(
-                out
-            )  # (batch_size, model_dim, num_nodes, out_steps)
-            out = self.output_proj(
-                out.transpose(1, 3)
-            )  # (batch_size, out_steps, num_nodes, output_dim)
-
-        return out
-
-
-# if __name__ == "__main__":
-#     model = custom_model(50, 12, 3)
-#     summary(model, [64, 12, 207, 3])
