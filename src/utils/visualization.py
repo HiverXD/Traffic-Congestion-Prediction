@@ -3,6 +3,9 @@
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import networkx as nx
+
+from tqdm import tqdm
 from collections import defaultdict
 
 def add_tod_dow(raw_data: np.ndarray, week_steps: int, C_origin: int) -> np.ndarray:
@@ -187,3 +190,111 @@ def plot_mape_violin(model, loader, device, edge_index, edge_attr,
     for ch, mean, std in zip(names_ch, ch_means, ch_stds):
         print(f"  {ch}: mean={mean:.4f}, std={std:.4f}")
     print(f"Overall MAPE: mean={overall_mean:.4f}, std={overall_std:.4f}")
+
+def plot_city_edge_mape(converted_nodes, converted_edges, river_info,
+                        loader, model, device,
+                        edge_index, edge_attr,
+                        city_size=10, save=False, output_dir='figures'):
+    """
+    converted_nodes: [{'id': int, 'coords': (x,y)}, ...]
+    converted_edges: [{'start': u, 'end': v}, ...]
+    loader: DataLoader yielding (x_batch, y_batch)
+    model: trained model returning [B, n_pred, E, C]
+    edge_index, edge_attr: 그래프 텐서
+    """
+    model.eval()
+    E = len(converted_edges)
+    mape_edges = [[] for _ in range(E)]
+    
+    # 1) 배치별 엣지 APE 수집
+    with torch.no_grad():
+        for x_batch, y_batch in tqdm(loader):
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+            pred = model(x_batch, edge_index, edge_attr)  # [B,n_pred,E,C]
+            
+            mask = y_batch.abs() > 1e-3
+            ape = torch.zeros_like(y_batch)
+            ape[mask] = (pred[mask] - y_batch[mask]).abs() / y_batch[mask]
+            ape_np  = ape.cpu().numpy()
+            mask_np = mask.cpu().numpy()
+            
+            for e in range(E):
+                vals = ape_np[:, :, e, :][mask_np[:, :, e, :]]
+                if vals.size > 0:
+                    mape_edges[e].append(vals.mean())
+
+    # 2) 엣지별 평균 MAPE 계산
+    mape_avg = np.array([np.mean(lst) if lst else np.nan for lst in mape_edges])
+    valid = ~np.isnan(mape_avg)
+    mape_valid = mape_avg[valid]
+    
+    # 3) 폭(width) 매핑: 작은 MAPE→굵게(max_w), 큰 MAPE→얇게(min_w)
+    min_w, max_w = 0.5, 5.0
+    if mape_valid.size:
+        mn, mx = mape_valid.min(), mape_valid.max()
+        widths = np.full(E, min_w)
+        widths[valid] = max_w - (mape_valid - mn)/(mx - mn)*(max_w - min_w)
+    else:
+        widths = np.full(E, (min_w+max_w)/2)
+
+    # 4) 그래프 생성
+    G = nx.DiGraph()
+    pos = {nd['id']: nd['coords'] for nd in converted_nodes}
+    for nd in converted_nodes:
+        G.add_node(nd['id'])
+
+    edgelist = []
+    edge_labels = {}
+    for i, e in enumerate(converted_edges):
+        u, v = e['start'], e['end']
+        edgelist.append((u, v))
+        edge_labels[(u, v)] = f"{mape_avg[i]:.2f}" if not np.isnan(mape_avg[i]) else ""
+
+    # 5) 시각화
+    fig, ax = plt.subplots(figsize=(8,8))
+    ax.set_facecolor('white')
+    ax.axis('off')
+
+    xs, ys, river_width = river_info
+    ax.plot(xs, ys,
+            color='cadetblue',
+            linewidth=river_width*5,
+            alpha=1.0)
+
+    # 노드
+    nx.draw_networkx_nodes(G, pos,
+                           node_color='lightgray',
+                           node_size=300,
+                           edgecolors='black',
+                           ax=ax)
+    nx.draw_networkx_labels(G, pos, font_size=8, ax=ax)
+
+    # 엣지
+    nx.draw_networkx_edges(G, pos,
+                           edgelist=edgelist,
+                           width=widths,
+                           edge_color='black',
+                           arrows=True,
+                           arrowstyle='-|>',
+                           arrowsize=12,
+                           ax=ax)
+    nx.draw_networkx_edge_labels(G, pos,
+                                 edge_labels=edge_labels,
+                                 font_size=7,
+                                 label_pos=0.5,
+                                 ax=ax)
+
+    ax.set_xlim(-1, city_size+1)
+    ax.set_ylim(-1, city_size+1)
+    ax.axis('on')
+    ax.set_axisbelow(True)
+    ax.grid('on')
+    plt.title("Edge-wise Average MAPE Visualization", fontsize=14)
+
+    if save:
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        plt.savefig(f"{output_dir}/edge_mape.png",
+                    dpi=300, bbox_inches='tight')
+    plt.show()

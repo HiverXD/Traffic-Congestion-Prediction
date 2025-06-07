@@ -79,3 +79,7 @@ for i, t in enumerate(road_types):
     onehot[i, type_to_idx[t]] = 1.0
 
 edge_attr = np.concatenate([distances[:,None], onehot], axis=1)  # (E, 1+num_types)
+
+river_info = (np.array([ 0.        ,  2.5       ,  3.33333333,  6.66666667,  7.5       ,
+       10.        ]), np.array([6.86811936, 6.86811936, 6.45145269, 6.45145269, 6.03478602,
+       6.03478602]), 1.6977288245972708)
