@@ -2,7 +2,7 @@ import torch
 from tqdm import tqdm
 
 def MAPE(pred, true):
-    mask = true.abs() > 1.0
+    mask = true.abs() > 1e-3
     return (torch.abs((pred[mask] - true[mask]) / true[mask])).mean().item()
 
 def calculate_performance_index(
