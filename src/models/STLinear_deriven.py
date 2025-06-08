@@ -204,7 +204,7 @@ class HopBiasedMultiHeadAttention(nn.Module):
 
         # 9) (B*T, E, d_model) → (B, T, E, d_model) 복원
         out = out.view(B, T, E, self.d_model)
-        return out
+        return out, attn_weights
 
 
 # -------------------------------------------------------------------
@@ -265,7 +265,7 @@ class HopBiasedSelfAttentionLayer(nn.Module):
         residual = x_trans
 
         # 2) Hop‐Biased Attention
-        out_attn = self.attn(x_trans)  # (batch_size, ..., length, model_dim)
+        out_attn, attn_map = self.attn(x_trans)  # (batch_size, ..., length, model_dim)
         out_attn = self.dropout1(out_attn)
         out_attn = self.ln1(residual + out_attn)
 
@@ -277,7 +277,12 @@ class HopBiasedSelfAttentionLayer(nn.Module):
 
         # 4) 원래 차원으로 transpose 복원
         out = out_ff.transpose(dim, -2)
-        return out
+        
+        if return_attn:
+
+            return out, attn_map
+        else:
+            return out
 
 
 # -------------------------------------------------------------------
@@ -408,7 +413,7 @@ class STLinear_HopBiased(nn.Module):
             for _ in range(num_layers)
         ])
 
-    def forward(self, x, edge_index=None, edge_attr=None):
+    def forward(self, x, edge_index=None, edge_attr=None, return_attn=False):
         """
         • 입력:
           - x: (B, in_steps, E, input_dim + tod + dow = 3)
@@ -466,9 +471,13 @@ class STLinear_HopBiased(nn.Module):
 
         # 10) 공간 블록 반복 (Hop‐Biased Self‐Attention)
         x_spatial = x_seq
+        spatial_maps = []
         for attn in self.attn_layers_s:
-            x_spatial = attn(x_spatial, dim=2)  # (B, in_steps, E, model_dim)
-
+            if return_attn:
+                x_spatial, attn_map = attn(x_spatial, dim=2, return_attn = True)  # (B, in_steps, E, model_dim)
+                spatial_maps.append(attn_map)
+            else:
+                x_spatial = attn(x_spatial, dim=2)
         # 11) 최종 예측
         if self.use_mixed_proj:
             # (B, in_steps, E, model_dim) → (B, E, in_steps, model_dim)
@@ -487,7 +496,10 @@ class STLinear_HopBiased(nn.Module):
             out = self.temporal_proj(out)     # (B, model_dim, E, out_steps)
             out = self.output_proj(out.transpose(1, 3))  # (B, out_steps, E, output_dim)
 
-        return out
+        if return_attn:
+            return out, spatial_maps
+        else:
+            return out
 
 
 # ==========================
