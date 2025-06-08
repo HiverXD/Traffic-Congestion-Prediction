@@ -298,3 +298,77 @@ def plot_city_edge_mape(converted_nodes, converted_edges, river_info,
         plt.savefig(f"{output_dir}/edge_mape.png",
                     dpi=300, bbox_inches='tight')
     plt.show()
+
+def plot_dow_mape_violin_filtered(loader, model, device,
+                                  edge_index, edge_attr,
+                                  dow_idx,
+                                  clip_percentile=95):
+    """
+    요일별 Step-wise & Edge-wise MAPE 분포를,
+    상위 clip_percentile 퍼센타일 이상 값은 해당 퍼센타일로 클리핑하여 그립니다.
+    """
+    model.eval()
+    # 첫 배치로 shape 추출
+    x0, y0 = next(iter(loader))
+    B0, n_pred, E, C = model(x0.to(device), edge_index, edge_attr).shape
+
+    # 요일별 저장소
+    step_mapes = {d: [[] for _ in range(n_pred)] for d in range(7)}
+    edge_mapes = {d: [] for d in range(7)}
+
+    with torch.no_grad():
+        for x_batch, y_batch in loader:
+            x, y = x_batch.to(device), y_batch.to(device)
+            pred = model(x, edge_index, edge_attr)  # [B,n_pred,E,C]
+
+            mask = y.abs() > 1e-3
+            ape = torch.zeros_like(y)
+            ape[mask] = (pred[mask] - y[mask]).abs() / y[mask]
+            ape_np  = ape.cpu().numpy()        # [B,n_pred,E,C]
+            # 채널 평균 → [B,n_pred,E]
+            mape_se = ape.mean(dim=-1).cpu().numpy()  
+
+            # DOW 추출 (각 배치마다 동일하다고 가정)
+            dow_vals = x[..., dow_idx].cpu().numpy()[:,0,0].astype(int)
+
+            for b, d in enumerate(dow_vals):
+                # step-wise
+                for s in range(n_pred):
+                    step_mapes[d][s].extend(mape_se[b, s, :].tolist())
+                # edge-wise (각 스텝 평균 → 엣지별)
+                edge_avg = mape_se[b].mean(axis=0)  # (E,)
+                edge_mapes[d].extend(edge_avg.tolist())
+
+    days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+
+    # --- 함수: 리스트를 받아 percentile 클리핑 ---
+    def clip_list(data_list, perc):
+        if not data_list:
+            return data_list
+        thresh = np.percentile(data_list, perc)
+        return np.minimum(data_list, thresh)
+
+    # 1) Step-wise
+    fig, axes = plt.subplots(1, n_pred, figsize=(4*n_pred,4), sharey=True)
+    for s, ax in enumerate(axes):
+        # 요일별 데이터를 클리핑
+        data = [clip_list(step_mapes[d][s], clip_percentile) for d in range(7)]
+        parts = ax.violinplot(data, positions=np.arange(1,8), showmeans=True)
+        ax.set_title(f"Step +{[3,6,12][s]}")
+        ax.set_xticks(np.arange(1,8)); ax.set_xticklabels(days, rotation=45)
+        ax.set_ylabel('MAPE' if s==0 else None)
+        ax.grid(True); ax.set_axisbelow(True)
+    fig.suptitle(f"Step-wise MAPE (clipped at {clip_percentile}‰)", y=1.02)
+    plt.tight_layout()
+    plt.show()
+
+    # 2) Edge-wise
+    fig, ax = plt.subplots(figsize=(8,4))
+    data = [clip_list(edge_mapes[d], clip_percentile) for d in range(7)]
+    parts = ax.violinplot(data, positions=np.arange(1,8), showmeans=True)
+    ax.set_xticks(np.arange(1,8)); ax.set_xticklabels(days, rotation=45)
+    ax.set_ylabel('MAPE')
+    ax.set_title(f"Edge-wise MAPE (clipped at {clip_percentile}‰)")
+    ax.grid(True); ax.set_axisbelow(True)
+    plt.tight_layout()
+    plt.show()
