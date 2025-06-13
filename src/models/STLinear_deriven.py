@@ -129,7 +129,7 @@ class HopBiasedMultiHeadAttention(nn.Module):
 
         # 2) Head 별로 학습 가능한 Hop‐Bias 세기 γ_h
         #    - 길이가 num_heads인 파라미터 텐서
-        self.hop_gamma = nn.Parameter(torch.zeros(num_heads))  
+        self.hop_gamma = nn.Parameter(torch.ones(num_heads))  
         #   → 초기값 0으로 두면, 학습 초반에는 bias 영향이 없음
 
         # 3) edge_spd (numpy.ndarray) → torch.LongTensor
